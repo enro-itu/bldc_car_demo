@@ -1,214 +1,167 @@
-# BLDC Car Demo (ROS 2 Jazzy + Gazebo)
+# BLDC Car (RWD) — Mapping & Workspace Sourcing
 
-A minimal differential-drive car simulation with BLDC motor physics. `/cmd_vel` is converted to voltage commands for each rear wheel, and the plugin computes current, torque, and angular velocity realistically.
+## 1) `/cmd_vel` → rear-wheel voltages (hinted mappings)
+
+Let:
+- `vx` = linear x (m/s)  
+- `wz` = angular z (rad/s)  
+- `R` = wheel radius (m)  
+- `B` = half track (m)  *(half the distance between left/right wheels)*  
+- `ωL, ωR` = target wheel angular speeds (rad/s)  
+- `vmax` = bus voltage clamp (V)
+
+### A. Kinematics → wheel speeds
+```text
+ωL = (vx - wz * B) / R
+ωR = (vx + wz * B) / R
+```
+
+### B. Voltage mapping
+
+Speed PI on each rear wheel (robust)
+Subscribe to `/car/rear_*/state` (Vector3: x=ω, y=I, z=τ).  
+Let `e = ω_target - ω_meas`. Add PI around A1:
+```text
+VL = clamp( Kv * ωL + Kp * eL + Ki * ∫eL dt, -vmax, +vmax )
+VR = clamp( Kv * ωR + Kp * eR + Ki * ∫eR dt, -vmax, +vmax )
+```
+- Start small: `Kp ≈ 0.3..1.0`, `Ki ≈ 0.1*Kp` (tune in sim).  
+- Keep an anti-windup: freeze integrator when |V|=vmax and sign would push further into saturation.
 
 ---
 
-## 1. Prerequisites
+## 2) Minimal mapper node (skeleton)
 
-- Ubuntu 24.04 (Noble)
-- ROS 2 Jazzy
-- Gazebo (gz-sim)
-- colcon, git
-- Keyboard teleop package
+```python
+#!/usr/bin/env python3
+import rclpy, math
+from rclpy.node import Node
+from geometry_msgs.msg import Twist
+from std_msgs.msg import Float64
+from geometry_msgs.msg import Vector3  # for optional PI feedback
 
-```bash
-sudo apt update
-sudo apt install \
-  ros-jazzy-desktop ros-jazzy-gazebo-ros-pkgs \
-  python3-colcon-common-extensions git \
-  ros-jazzy-teleop-twist-keyboard
+class RwdVoltageMapper(Node):
+    def __init__(self):
+        super().__init__('rwd_voltage_mapper')
+        # Params
+        self.declare_parameter('wheel_radius', 0.07)
+        self.declare_parameter('half_track',  0.15)
+        self.declare_parameter('Kv',          0.20)   # V per rad/s
+        self.declare_parameter('vmax',        12.0)
+        self.declare_parameter('use_pi',      True)
+        self.declare_parameter('Kp',          0.6)
+        self.declare_parameter('Ki',          0.1)
+
+        p = self.get_parameter
+        self.R   = float(p('wheel_radius').value)
+        self.B   = float(p('half_track').value)
+        self.Kv  = float(p('Kv').value)
+        self.vmax= float(p('vmax').value)
+
+        self.use_pi = bool(p('use_pi').value)
+        self.Kp = float(p('Kp').value); self.Ki = float(p('Ki').value)
+
+        # IO
+        self.pub_L = self.create_publisher(Float64, '/car/rear_left/voltage', 10)
+        self.pub_R = self.create_publisher(Float64, '/car/rear_right/voltage', 10)
+        self.create_subscription(Twist, '/cmd_vel', self.on_cmd, 10)
+
+        # Optional feedback (ω from plugin state)
+        self.omega_L = 0.0; self.omega_R = 0.0
+        if self.use_pi:
+            self.create_subscription(Vector3, '/car/rear_left/state',  self.on_state_L, 10)
+            self.create_subscription(Vector3, '/car/rear_right/state', self.on_state_R, 10)
+            self.iL = 0.0; self.iR = 0.0
+            self.dt = 1.0/100.0
+            self.create_timer(self.dt, self.control_tick)
+            self.target = (0.0, 0.0)  # (ωL, ωR)
+
+    def clamp(self, x): return max(-self.vmax, min(self.vmax, x))
+
+    def on_state_L(self, msg): self.omega_L = msg.x
+    def on_state_R(self, msg): self.omega_R = msg.x
+
+    def on_cmd(self, msg: Twist):
+        vx = msg.linear.x; wz = msg.angular.z
+        wL = (vx - wz * self.B) / self.R
+        wR = (vx + wz * self.B) / self.R
+        if not self.use_pi:
+            self.pub_L.publish(Float64(data=self.clamp(self.Kv*wL)))
+            self.pub_R.publish(Float64(data=self.clamp(self.Kv*wR)))
+        else:
+            self.target = (wL, wR)  # PI runs in timer
+
+    def control_tick(self):
+        wL_t, wR_t = self.target
+        eL = wL_t - self.omega_L
+        eR = wR_t - self.omega_R
+        self.iL += eL * self.dt
+        self.iR += eR * self.dt
+        VL = self.Kv*wL_t + self.Kp*eL + self.Ki*self.iL
+        VR = self.Kv*wR_t + self.Kp*eR + self.Ki*self.iR
+        # anti-windup (simple)
+        satL = self.clamp(VL); satR = self.clamp(VR)
+        if abs(VL) > self.vmax and ((VL>0 and eL>0) or (VL<0 and eL<0)): self.iL -= eL*self.dt
+        if abs(VR) > self.vmax and ((VR>0 and eR>0) or (VR<0 and eR<0)): self.iR -= eR*self.dt
+        self.pub_L.publish(Float64(data=satL))
+        self.pub_R.publish(Float64(data=satR))
+
+def main():
+    rclpy.init(); rclpy.spin(RwdVoltageMapper()); rclpy.shutdown()
+if __name__ == '__main__': main()
 ```
+
+Use it as-is or strip the PI bits by setting `use_pi:=False`.
 
 ---
 
-## 2. Workspace Setup
+## 3) How to source the existing project inside the new one
 
-1. Create workspace:
-```bash
-mkdir -p ~/ros2_ws/src
-cd ~/ros2_ws/src
+### **Single workspace (simplest)**
+Put both packages in the same workspace:
 ```
-
-2. Clone the car demo package:
-```bash
-git clone -b Prototype https://github.com/enro-itu/bldc_car_demo.git
+~/ws/
+  src/bldc_motor_sim/         # given project (plugin, GUI)
+  src/bldc_car_demo/          # your new package
 ```
-
-3. Clone the BLDC motor plugin package (required):
+Build & source:
 ```bash
-git clone -b Prototype_Car_Demo https://github.com/enro-itu/BLDCGazeboROS2.git
-```
-
-> **Note:** The BLDC motor plugin is required for this demo to work. See [BLDCGazeboROS2](https://github.com/enro-itu/BLDCGazeboROS2) and its [plugin source](https://github.com/enro-itu/BLDCGazeboROS2/blob/main/src/bldc_motor_plugin.cpp) for details.
-
----
-
-## 3. Build
-
-```bash
-cd ~/ros2_ws
+cd ~/ws
+rosdep install --from-paths src --ignore-src -y
 colcon build --symlink-install
+source install/setup.bash
 ```
-
-If the build fails, fix errors and re-run `colcon build`.
+One build, one overlay; Gazebo finds `libbldc_motor_plugin.so` automatically.
 
 ---
 
-## 4. Source (every terminal)
+## 4) Quick launch checklist
 
-This is the most common pitfall. If you forget this, `ros2 run`/`ros2 launch` won’t find your packages.
-
+- In your car SDF, attach **two** plugin blocks only to **rear** joints:
+  - `/car/rear_left/voltage`, `/car/rear_left/state`
+  - `/car/rear_right/voltage`, `/car/rear_right/state`
+- Start Gazebo + your mapper:
 ```bash
-# ROS 2
-source /opt/ros/jazzy/setup.bash
-
-# your workspace
-source ~/ros2_ws/install/setup.bash
+ros2 launch bldc_car_demo car_demo.launch.py
 ```
-
-To make this automatic in new terminals:
-```bash
-echo 'source /opt/ros/jazzy/setup.bash' >> ~/.bashrc
-echo 'source ~/ros2_ws/install/setup.bash' >> ~/.bashrc
-```
-
----
-
-## 5. Gazebo Plugin Path
-
-Ensure Gazebo can find the BLDC system plugin:
-
-```bash
-export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ros2_ws/install/bldc_gz_sim/lib
-```
-
-(Optional) Persist it:
-```bash
-echo 'export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ros2_ws/install/bldc_gz_sim/lib' >> ~/.bashrc
-```
-
----
-
-## 6. Run (correct order)
-
-Open three terminals (A, B, C). In each one, run the Source commands above.
-
-**A) Launch the world + car**
-```bash
-ros2 launch bldc_car_demo sim_car.launch.py
-```
-
-**B) Start the cmd_vel → voltage mapper (must be running)**
-```bash
-ros2 run bldc_car_demo cmd_vel_to_voltage
-```
-
-Expected output:
-```
-[INFO] [cmd_vel_to_voltage]: Mapping /cmd_vel -> /rear_left/voltage_cmd, /rear_right/voltage_cmd
-```
-
-**C) Start keyboard teleop**
+- Drive with teleop:
 ```bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
-
-Keys:
-- i / ,  : forward / backward
-- j / l  : turn left / right
-- q / z  : increase / decrease max speeds
-- w / x  : adjust linear speed
-- e / c  : adjust angular speed
-
----
-
-## 7. Topics & Data Flow
-
-```
-/cmd_vel (Twist)
-    ↓
-cmd_vel_to_voltage
-    ↓                 ↓
-/rear_left/voltage_cmd   /rear_right/voltage_cmd
-    ↓                         ↓
-BLDCMotorPlugin (left)   BLDCMotorPlugin (right)
-    ↓                         ↓
-/rear_left/state            /rear_right/state
-```
-
-- `/cmd_vel` → `geometry_msgs/Twist`
-- `/rear_left/voltage_cmd` → `std_msgs/Float64`
-- `/rear_right/voltage_cmd` → `std_msgs/Float64`
-- `/rear_left/state` & `/rear_right/state` → `geometry_msgs/Vector3`
-
-`state` message:
-- **x** = angular velocity ω [rad/s]
-- **y** = current I [A]
-- **z** = torque τ [N·m]
-
-Values are formatted to 3 decimals.
-
----
-
-## 8. Monitor & Manual Tests
-
-View state:
+- Verify:
 ```bash
-ros2 topic echo /rear_left/state
-ros2 topic echo /rear_right/state
-```
-
-Example:
-```
-x: 7.157
-y: 23.714
-z: 0.474
-```
-
-Manual `/cmd_vel` (without teleop):
-```bash
-# forward
-ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5}, angular: {z: 0.0}}"
-
-# rotate left
-ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.5}}"
-```
-
-Manual voltage commands (bypass mapper):
-```bash
-ros2 topic pub /rear_left/voltage_cmd  std_msgs/msg/Float64 "data: 12.0"
-ros2 topic pub /rear_right/voltage_cmd std_msgs/msg/Float64 "data: 12.0"
+ros2 topic hz /car/rear_left/state
+ros2 topic echo /car/rear_left/state --rate 2
 ```
 
 ---
 
-## 9. Motor Model (per wheel)
+## 5) Notes (to avoid head-scratching)
 
-```
-I = (V - Ke * ω) / R
-τ = Kt * I
-```
+- **Axes:** rear wheel joints must rotate about **Y** (`0 1 0`) so +ω → forward in +X.
+- **Collisions:** use **cylinder** collisions for wheels (visual meshes are fine, but keep collisions primitive).
+- **Stability:** keep `<damping>` on wheel joints and `b_viscous` in plugin SDF; clamp current/torque.
+- **Model discovery:** if Gazebo says “plugin not found”, you didn’t source the plugin workspace.
+- **Rates:** set plugin `publish_rate_hz ≈ 30–50`. PI timer at ~100 Hz is fine.
 
-As speed rises, `Ke·ω` increases → effective current drops → torque decreases.
-
-Even at constant voltage `V`, current `I`, torque `τ`, and angular velocity `ω` evolve until they reach an electrical–mechanical equilibrium.
-
----
-
-## 10. Parameters (mapper: cmd_vel_to_voltage)
-
-You can override via YAML or CLI params:
-- `wheel_separation` (m)
-- `wheel_radius` (m)
-- `max_voltage` (V)
-- `kv_vel` (V per rad/s, mapping gain)
-- `ks_static` (V, static offset)
-- `deadman_timeout` (s)
-- `publish_rate_hz` (Hz)
-- `left_cmd_topic`, `right_cmd_topic` (strings)
-
-Example run with custom param:
-```bash
-ros2 run bldc_car_demo cmd_vel_to_voltage --ros-args -p max_voltage:=18.0
-```
+That’s it — they’ll have everything they need without getting lost.
