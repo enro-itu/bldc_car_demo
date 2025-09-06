@@ -1,16 +1,16 @@
 # BLDC Car Demo (ROS 2 Jazzy + Gazebo)
 
-A minimal differential-drive car simulation with BLDC motor physics.  
-`/cmd_vel` is converted to voltage commands for each rear wheel, and the plugin computes current, torque, and angular velocity realistically.
+A minimal differential-drive car simulation with BLDC motor physics. `/cmd_vel` is converted to voltage commands for each rear wheel, and the plugin computes current, torque, and angular velocity realistically.
 
 ---
 
-**Prerequisites**
+## 1. Prerequisites
 
-Ubuntu 24.04 (Noble)  
-ROS 2 Jazzy  
-Gazebo (gz-sim), colcon, git  
-Keyboard teleop package
+- Ubuntu 24.04 (Noble)
+- ROS 2 Jazzy
+- Gazebo (gz-sim)
+- colcon, git
+- teleop-twist-keyboard
 
 ```bash
 sudo apt update
@@ -22,7 +22,7 @@ sudo apt install \
 
 ---
 
-**Workspace Setup**
+## 2. Workspace Setup
 
 ```bash
 # create workspace
@@ -38,16 +38,20 @@ git clone -b Prototype_Car_Demo https://github.com/enro-itu/BLDCGazeboROS2.git
 
 ---
 
-**Build**
+## 3. Build
 
 ```bash
 cd ~/ros2_ws
 colcon build --symlink-install
 ```
 
+If build fails, fix errors and re-run `colcon build`.
+
 ---
 
-**Source (do this in every terminal you use)**
+## 4. Source
+
+Run these in **every terminal** before using ROS 2:
 
 ```bash
 # ROS 2
@@ -57,7 +61,7 @@ source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
 ```
 
-Make it automatic:
+(Optional) add them permanently:
 
 ```bash
 echo 'source /opt/ros/jazzy/setup.bash' >> ~/.bashrc
@@ -66,13 +70,13 @@ echo 'source ~/ros2_ws/install/setup.bash' >> ~/.bashrc
 
 ---
 
-**Gazebo Plugin Path**
+## 5. Gazebo Plugin Path
 
 ```bash
 export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ros2_ws/install/bldc_gz_sim/lib
 ```
 
-Persist:
+(Optional, permanent):
 
 ```bash
 echo 'export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ros2_ws/install/bldc_gz_sim/lib' >> ~/.bashrc
@@ -80,9 +84,9 @@ echo 'export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ros2_ws/install/bldc_gz_sim/lib' >>
 
 ---
 
-**Run (correct order)**
+## 6. Run (in order)
 
-Open three terminals (A, B, C). Source in each.
+Open three terminals (A, B, C). Source in each one.
 
 **A) Launch the world + car**
 ```bash
@@ -93,7 +97,6 @@ ros2 launch bldc_car_demo sim_car.launch.py
 ```bash
 ros2 run bldc_car_demo cmd_vel_to_voltage
 ```
-
 Expected output:
 ```
 [INFO] [cmd_vel_to_voltage]: Mapping /cmd_vel -> /rear_left/voltage_cmd, /rear_right/voltage_cmd
@@ -104,34 +107,24 @@ Expected output:
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
-Keys:
-```
-i/j/k/l/,  motion
-q/z        change max speeds
-w/x        linear only
-e/c        angular only
-```
+Controls:
+- i/j/k/l/, → motion
+- q/z → increase/decrease max speed
+- w/x → linear speed only
+- e/c → angular speed only
 
 ---
 
-**Topics & Data Flow**
+## 7. Topics & Data Flow
 
-```
-/cmd_vel (Twist)
-   ↓
-cmd_vel_to_voltage
-   ↓                 ↓
-/rear_left/voltage_cmd    /rear_right/voltage_cmd
-   ↓                 ↓
-BLDCMotorPlugin L    BLDCMotorPlugin R
-   ↓                 ↓
-/rear_left/state          /rear_right/state
-```
+- `/cmd_vel` → `geometry_msgs/Twist`
+- `/rear_left/voltage_cmd`, `/rear_right/voltage_cmd` → `std_msgs/Float64`
+- `/rear_left/state`, `/rear_right/state` → `geometry_msgs/Vector3`
 
-State message (`geometry_msgs/Vector3`):
-- `x` = angular velocity ω [rad/s]
-- `y` = current I [A]
-- `z` = torque τ [N·m]
+State message fields:
+- x = angular velocity ω [rad/s]
+- y = current I [A]
+- z = torque τ [N·m]
 
 Example:
 ```
@@ -142,26 +135,24 @@ z: 0.474
 
 ---
 
-**Monitor & Manual Tests**
+## 8. Monitoring & Manual Tests
 
-View state:
+**View state:**
 ```bash
 ros2 topic echo /rear_left/state
 ros2 topic echo /rear_right/state
 ```
 
-Manual `/cmd_vel`:
+**Send manual /cmd_vel:**
 ```bash
 # forward
-ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist \
-  "{linear: {x: 0.5}, angular: {z: 0.0}}"
+ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5}, angular: {z: 0.0}}"
 
-# rotate left
-ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist \
-  "{linear: {x: 0.0}, angular: {z: 0.5}}"
+# rotate left in place
+ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}, angular: {z: 0.5}}"
 ```
 
-Manual voltages:
+**Bypass mapper (manual voltages):**
 ```bash
 ros2 topic pub /rear_left/voltage_cmd  std_msgs/msg/Float64 "data: 12.0"
 ros2 topic pub /rear_right/voltage_cmd std_msgs/msg/Float64 "data: 12.0"
@@ -169,19 +160,19 @@ ros2 topic pub /rear_right/voltage_cmd std_msgs/msg/Float64 "data: 12.0"
 
 ---
 
-**Motor Model**
+## 9. Motor Model (per wheel)
 
 ```
-I = (V - Ke·ω) / R
-τ = Kt·I
+I = (V - Ke * ω) / R
+τ = Kt * I
 ```
 
-As speed ω increases, back-EMF Ke·ω rises, current drops, torque decreases.  
-Even at constant voltage, I, τ, and ω evolve to equilibrium.
+- As speed rises, `Ke * ω` increases → effective current drops → torque decreases.
+- Even at constant voltage, I, τ, and ω evolve until equilibrium.
 
 ---
 
-**Mapper Parameters**
+## 10. Mapper Parameters (`cmd_vel_to_voltage`)
 
 - `wheel_separation` (m)
 - `wheel_radius` (m)
@@ -190,7 +181,7 @@ Even at constant voltage, I, τ, and ω evolve to equilibrium.
 - `ks_static` (V)
 - `deadman_timeout` (s)
 - `publish_rate_hz` (Hz)
-- `left_cmd_topic`, `right_cmd_topic`
+- `left_cmd_topic`, `right_cmd_topic` (strings)
 
 Example:
 ```bash
