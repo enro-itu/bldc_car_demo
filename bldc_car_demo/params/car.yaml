@@ -1,0 +1,17 @@
+bldc_car_demo:
+  ros__parameters:
+    wheel_separation: 0.36       # [m]
+    wheel_radius: 0.08           # [m]
+    max_voltage: 24.0            # [V]
+    kv_vel: 0.04                 # [V/(rad/s)]
+    ks_static: 0.6               # [V]
+    deadman_timeout: 0.5         # [s]
+    publish_rate_hz: 50.0        # [Hz]
+
+    left_cmd_topic: "/rear_left/voltage_cmd"
+    right_cmd_topic: "/rear_right/voltage_cmd"
+
+    left_state_in: "/rear_left/state"
+    right_state_in: "/rear_right/state"
+    left_state_out: "/bldc_car/left/motor_state"
+    right_state_out: "/bldc_car/right/motor_state"
